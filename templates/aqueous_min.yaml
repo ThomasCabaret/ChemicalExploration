@@ -7,21 +7,20 @@ context:
 
 group_library:
   carboxylic_acid: "[CX3](=O)[OX2H1]"
-  alcohol: "[OX2H][!$([OX2H][CX3](=O))]"   # avoid the -OH of carboxylic acids
+  alcohol: "[OX2H][!$([OX2H][CX3](=O))]"
   thiol: "[SX2H]"
   ester: "[CX3](=O)[OX2][#6]"
   thioester: "[CX3](=O)[SX2][#6]"
-  amine_primary: "[NX3;H2][#6]"            # R-NH2
+  amine_primary: "[NX3;H2][#6]"
   amide: "[CX3](=O)[NX3;!$([NX3](=O))]"
 
 forbidden_substructures:
-  - "[N-]=[N+]"        # diazonium etc. (placeholder)
-  - "[O-][O-]"        # peroxide dianion (placeholder)
-  - "[#17,#35,#53]"   # halogens (keep CHNOPS)
+  - "[N-]=[N+]"
+  - "[O-][O-]"
+  - "[#17,#35,#53]"
 
 templates:
 
-  # 1) Esterification (reversible with hydrolysis)
   - id: esterification
     reversible: true
     reactants:
@@ -29,19 +28,18 @@ templates:
       - {group: alcohol}
     products:
       - {group: ester}
-      - {molecule: "O"}         # water
+      - {molecule: "O"}
     constraints:
       stoichiometry_balanced: true
       keep_connectivity_outside_groups: true
     kinetics_placeholder:
       model: BEP
       alpha: 0.5
-      E0_kJ_per_mol: 60.0       # placeholder; tuned later
+      E0_kJ_per_mol: 60.0
     thermo_rule:
-      type: sum_formation_energies  # ?rG' from species ?fG'
-    notes: "Generic Fischer–Speier; in pure water often uphill without activation."
+      type: sum_formation_energies
+    notes: "Generic Fischer-Speier; often uphill in pure water without activation."
 
-  # 2) Thioester formation (reversible with hydrolysis)
   - id: thioesterification
     reversible: true
     reactants:
@@ -61,7 +59,6 @@ templates:
       type: sum_formation_energies
     notes: "Prebiotic-relevant; thioesters as acyl donors."
 
-  # 3) Acyl transfer: thioester -> ester
   - id: acyl_transfer_thioester_to_ester
     reversible: true
     reactants:
@@ -79,9 +76,8 @@ templates:
       E0_kJ_per_mol: 35.0
     thermo_rule:
       type: sum_formation_energies
-    notes: "Transesterification via thioester; usually easier than direct esterification."
+    notes: "Transesterification via thioester."
 
-  # 4) Acyl transfer: thioester -> amide
   - id: acyl_transfer_thioester_to_amide
     reversible: true
     reactants:
@@ -99,14 +95,13 @@ templates:
       E0_kJ_per_mol: 30.0
     thermo_rule:
       type: sum_formation_energies
-    notes: "Amidation via thioester (prebiotic motif)."
+    notes: "Amidation via thioester."
 
-  # 5) Ester hydrolysis (explicit forward if you préfér it separate)
   - id: ester_hydrolysis
     reversible: true
     reactants:
       - {group: ester}
-      - {molecule: "O"}         # water
+      - {molecule: "O"}
     products:
       - {group: carboxylic_acid}
       - {group: alcohol}
@@ -120,7 +115,6 @@ templates:
     thermo_rule:
       type: sum_formation_energies
 
-  # 6) Amide hydrolysis (slow; high barrier placeholder)
   - id: amide_hydrolysis
     reversible: true
     reactants:
@@ -139,17 +133,16 @@ templates:
     thermo_rule:
       type: sum_formation_energies
 
-  # 7) Acid-base proton transfer (state change; not a bond reshuffle)
   - id: acid_base_proton_transfer
     reversible: true
     reactants:
-      - {group: carboxylic_acid}   # generic acid; provider will use pKa to switch states
+      - {group: carboxylic_acid}
     products:
-      - {group: carboxylic_acid}   # same connectivity, different protonation microstate
+      - {group: carboxylic_acid}
     constraints:
       type: state_change
     kinetics_placeholder:
       model: instantaneous_equilibrium
     thermo_rule:
       type: Henderson_Hasselbalch
-    notes: "Provider handles microstate populations vs pH; not counted as net reaction in S, but affects species ?fG'."
+    notes: "Provider handles microstate populations vs pH; affects species dGf' only."

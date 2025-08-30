@@ -1,0 +1,4 @@
+id,name,smiles,groups
+EtOH,ethanol,CCO,alcohol
+MeSH,methanethiol,CS,thiol
+NH3,ammonia,N,amine_primary

@@ -1,0 +1,5 @@
+id,name,smiles,groups
+HA6,hexanoic_acid,CCCCCC(=O)O,carboxylic_acid
+EtSH,ethanethiol,CCS,thiol
+EtOH,ethanol,CCO,alcohol
+NH3,ammonia,N,amine_primary

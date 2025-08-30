@@ -483,6 +483,60 @@ def network_score(sol: Dict[str, object],
     return float(sol["gainX"]) + gamma_min * dom["dominance_min_ratio"] + gamma_avg * dom["dominance_avg_ratio"] - lambda_size * k
 
 
+def debug_scope_snapshot(provider, scope, max_list=6):
+    import numpy as np
+    m = provider.species_count()
+    k = len(scope)
+    S = provider.stoichiometry_submatrix(scope)
+    U = provider.capacity_upper_bounds(scope)
+    allowed = provider.thermo_allowed_mask(scope)
+    parts = provider.participants_lists(scope)
+    usesX = provider.uses_X_mask(scope)
+    X = provider.autocatalyst_index()
+    T = provider.target_species()
+
+    print(f"  [DBG] scope k={k} | allowed={int(allowed.sum())} | usesX={int(usesX.sum())}")
+    if k == 0:
+        return
+    # capacity-style hints
+    prod_cap_X = float(np.dot(np.maximum(S[X, :], 0.0), U))
+    cons_cap_X = float(np.dot(np.maximum(-S[X, :], 0.0), U))
+    print(f"  [DBG] X prod_cap={prod_cap_X:.3f}  cons_cap={cons_cap_X:.3f}")
+    for t in sorted(T):
+        prod_cap_t = float(np.dot(np.maximum(S[t, :], 0.0), U))
+        print(f"  [DBG] target {t} prod_cap={prod_cap_t:.3f}")
+
+    # list a few reactions (by largest U)
+    idxs = list(np.argsort(-U))[:max_list]
+    dRG_all = provider.delta_rG_all()
+    for j in idxs:
+        gidx = scope[j]
+        dRG = (dRG_all[gidx] if dRG_all.size else float('nan'))
+        sx = S[X, j] if m else 0.0
+        print(f"    r{j}: allowed={bool(allowed[j])} usesX={bool(usesX[j])} U={U[j]:.2f} dGr'={dRG:.2f} parts={parts[j]} Sx={sx:+.0f}")
+
+
+def debug_infeasibility_hints(provider, scope, spec):
+    import numpy as np
+    S = provider.stoichiometry_submatrix(scope)
+    if S.shape[1] == 0:
+        print("  [HINT] No reactions in scope.")
+        return
+    U = provider.capacity_upper_bounds(scope)
+    allowed = provider.thermo_allowed_mask(scope)
+    X = provider.autocatalyst_index()
+
+    prod_cap_X_allowed = float(np.dot(np.maximum(S[X, :], 0.0), U * allowed.astype(float)))
+    cons_cap_X_allowed = float(np.dot(np.maximum(-S[X, :], 0.0), U * allowed.astype(float)))
+    print(f"  [DBG] (allowed-only) X prod_cap={prod_cap_X_allowed:.3f} cons_cap={cons_cap_X_allowed:.3f}")
+
+    if spec.eps_gain_X > 0.0 and prod_cap_X_allowed <= 1e-9:
+        print("  [HINT] No producer of X in allowed reactions, but eps_gain_X > 0 -> unsatisfiable.")
+
+    usesX = provider.uses_X_mask(scope)
+    if int(usesX.sum()) == 0:
+        print("  [HINT] No reaction consumes X in scope -> autocatalysis trigger cannot be met.")
+
 # ------------------------------ Driver (incremental scope with logs) ------------------------------
 
 def search_best_network(provider: ChemProvider, spec: ProblemSpec, random_seed: int = 42) -> None:
@@ -508,12 +562,14 @@ def search_best_network(provider: ChemProvider, spec: ProblemSpec, random_seed: 
         pct = int(100 * it / spec.max_rounds)
         print(f"[Round {it}/{spec.max_rounds} | ~{pct}%] Scope size: {len(scope)}")
 
+        debug_scope_snapshot(provider, scope)
         milp = SubnetworkMILP(provider, spec, scope)
         sol = milp.solve()
 
         if sol.get("status") == "NO_X_CONSUMER_IN_SCOPE":
             print("  -> No reaction in scope consumes X. Expanding scope.")
         elif not sol.get("solved", False):
+            debug_infeasibility_hints(provider, scope, spec)
             print(f"  -> MILP infeasible or no solution (time {sol.get('time_s', 0):.2f}s).")
         else:
             dom = dominance_metrics(provider, scope, sol)
@@ -574,18 +630,8 @@ if __name__ == "__main__":
         scope_step=80,
     )
 
-    # Synthetic data provider (all chemistry numbers go through getters)
-    provider = SyntheticChemProvider(
-        m=60,
-        n=600,
-        food_size=6,
-        target_size=6,          # pretend these are amphiphile-like targets
-        max_reactants=2,
-        max_products=2,
-        allow_nonspontaneous=False,
-        alpha=5.0,
-        max_selected=60,
-        seed=42,
-    )
+    from real_chem_provider import RealChemProvider
+    provider = RealChemProvider(base_dir=".")
+    provider.build_reactions_from_templates(max_reactions=2000)
 
     search_best_network(provider, spec, random_seed=42)
