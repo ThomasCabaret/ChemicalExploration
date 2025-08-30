@@ -1,0 +1,155 @@
+version: 0.1
+context:
+  phase: aqueous
+  allowed_elements: [C, H, N, O, P, S]
+  pH_window: [5.0, 9.0]
+  temperature_K: [273.15, 373.15]
+
+group_library:
+  carboxylic_acid: "[CX3](=O)[OX2H1]"
+  alcohol: "[OX2H][!$([OX2H][CX3](=O))]"   # avoid the -OH of carboxylic acids
+  thiol: "[SX2H]"
+  ester: "[CX3](=O)[OX2][#6]"
+  thioester: "[CX3](=O)[SX2][#6]"
+  amine_primary: "[NX3;H2][#6]"            # R-NH2
+  amide: "[CX3](=O)[NX3;!$([NX3](=O))]"
+
+forbidden_substructures:
+  - "[N-]=[N+]"        # diazonium etc. (placeholder)
+  - "[O-][O-]"        # peroxide dianion (placeholder)
+  - "[#17,#35,#53]"   # halogens (keep CHNOPS)
+
+templates:
+
+  # 1) Esterification (reversible with hydrolysis)
+  - id: esterification
+    reversible: true
+    reactants:
+      - {group: carboxylic_acid}
+      - {group: alcohol}
+    products:
+      - {group: ester}
+      - {molecule: "O"}         # water
+    constraints:
+      stoichiometry_balanced: true
+      keep_connectivity_outside_groups: true
+    kinetics_placeholder:
+      model: BEP
+      alpha: 0.5
+      E0_kJ_per_mol: 60.0       # placeholder; tuned later
+    thermo_rule:
+      type: sum_formation_energies  # ?rG' from species ?fG'
+    notes: "Generic Fischer–Speier; in pure water often uphill without activation."
+
+  # 2) Thioester formation (reversible with hydrolysis)
+  - id: thioesterification
+    reversible: true
+    reactants:
+      - {group: carboxylic_acid}
+      - {group: thiol}
+    products:
+      - {group: thioester}
+      - {molecule: "O"}
+    constraints:
+      stoichiometry_balanced: true
+      keep_connectivity_outside_groups: true
+    kinetics_placeholder:
+      model: BEP
+      alpha: 0.55
+      E0_kJ_per_mol: 45.0
+    thermo_rule:
+      type: sum_formation_energies
+    notes: "Prebiotic-relevant; thioesters as acyl donors."
+
+  # 3) Acyl transfer: thioester -> ester
+  - id: acyl_transfer_thioester_to_ester
+    reversible: true
+    reactants:
+      - {group: thioester}
+      - {group: alcohol}
+    products:
+      - {group: ester}
+      - {group: thiol}
+    constraints:
+      stoichiometry_balanced: true
+      preserve_carbonyl_carbon: true
+    kinetics_placeholder:
+      model: BEP
+      alpha: 0.6
+      E0_kJ_per_mol: 35.0
+    thermo_rule:
+      type: sum_formation_energies
+    notes: "Transesterification via thioester; usually easier than direct esterification."
+
+  # 4) Acyl transfer: thioester -> amide
+  - id: acyl_transfer_thioester_to_amide
+    reversible: true
+    reactants:
+      - {group: thioester}
+      - {group: amine_primary}
+    products:
+      - {group: amide}
+      - {group: thiol}
+    constraints:
+      stoichiometry_balanced: true
+      preserve_carbonyl_carbon: true
+    kinetics_placeholder:
+      model: BEP
+      alpha: 0.6
+      E0_kJ_per_mol: 30.0
+    thermo_rule:
+      type: sum_formation_energies
+    notes: "Amidation via thioester (prebiotic motif)."
+
+  # 5) Ester hydrolysis (explicit forward if you préfér it separate)
+  - id: ester_hydrolysis
+    reversible: true
+    reactants:
+      - {group: ester}
+      - {molecule: "O"}         # water
+    products:
+      - {group: carboxylic_acid}
+      - {group: alcohol}
+    constraints:
+      stoichiometry_balanced: true
+    kinetics_placeholder:
+      model: Arrhenius
+      A: 1.0e6
+      n: 0.0
+      Ea_kJ_per_mol: 70.0
+    thermo_rule:
+      type: sum_formation_energies
+
+  # 6) Amide hydrolysis (slow; high barrier placeholder)
+  - id: amide_hydrolysis
+    reversible: true
+    reactants:
+      - {group: amide}
+      - {molecule: "O"}
+    products:
+      - {group: carboxylic_acid}
+      - {group: amine_primary}
+    constraints:
+      stoichiometry_balanced: true
+    kinetics_placeholder:
+      model: Arrhenius
+      A: 1.0e5
+      n: 0.0
+      Ea_kJ_per_mol: 100.0
+    thermo_rule:
+      type: sum_formation_energies
+
+  # 7) Acid-base proton transfer (state change; not a bond reshuffle)
+  - id: acid_base_proton_transfer
+    reversible: true
+    reactants:
+      - {group: carboxylic_acid}   # generic acid; provider will use pKa to switch states
+    products:
+      - {group: carboxylic_acid}   # same connectivity, different protonation microstate
+    constraints:
+      type: state_change
+    kinetics_placeholder:
+      model: instantaneous_equilibrium
+    thermo_rule:
+      type: Henderson_Hasselbalch
+    notes: "Provider handles microstate populations vs pH; not counted as net reaction in S, but affects species ?fG'."
