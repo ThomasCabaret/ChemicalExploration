@@ -1,0 +1,2 @@
+id,name,smiles,headgroup,chain_c_total,unsaturation,demand_min,weight
+FA10,decanoic_acid,CCCCCCCCC(=O)O,carboxylate,10,0,1.0,1.0

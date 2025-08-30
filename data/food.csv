@@ -1,0 +1,7 @@
+id,name,smiles
+CH4,methane,C
+CO,carbon_monoxide,[C-]#[O+]
+CO2,carbon_dioxide,O=C=O
+H2,hydrogen,[H][H]
+H2S,hydrogen_sulfide,[H]S[H]
+HCN,hydrogen_cyanide,[H]N#C
