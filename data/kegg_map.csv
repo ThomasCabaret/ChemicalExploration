@@ -1,0 +1,8 @@
+name,smiles,kegg_cid
+methane,C,C01438
+carbon_monoxide,[C-]#[O+],C00237
+carbon_dioxide,O=C=O,C00011
+hydrogen,[H][H],C00282
+hydrogen_sulfide,[H]S[H],C00283
+hydrogen_cyanide,[H]N#C,C01326
+decanoic_acid,CCCCCCCCC(=O)O,C01571
