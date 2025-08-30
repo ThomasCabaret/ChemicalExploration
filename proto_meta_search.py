@@ -237,6 +237,19 @@ class SyntheticChemProvider(ChemProvider):
 
 # ------------------------------ Problem spec (objectives/constraints) ------------------------------
 
+from dataclasses import dataclass
+from typing import List, Dict, Optional
+
+@dataclass
+class SearchResult:
+    solved: bool
+    score: float = 0.0
+    round_best: int = -1
+    scope_size: int = 0
+    sol: Optional[Dict[str, object]] = None
+    dom: Optional[Dict[str, float]] = None
+    scope_idx: Optional[List[int]] = None
+
 @dataclass
 class ProblemSpec:
     """Holds problem-specific knobs while keeping the solver generic."""
@@ -537,6 +550,127 @@ def debug_infeasibility_hints(provider, scope, spec):
     if int(usesX.sum()) == 0:
         print("  [HINT] No reaction consumes X in scope -> autocatalysis trigger cannot be met.")
 
+# ------------------------------ GraphViz export ------------------------------
+
+import os
+from typing import Iterable
+
+def _next_output_path(out_dir: str = "output", prefix: str = "network_", ext: str = ".dot") -> str:
+    os.makedirs(out_dir, exist_ok=True)
+    existing = [f for f in os.listdir(out_dir) if f.startswith(prefix) and f.endswith(ext)]
+    nums = []
+    for f in existing:
+        core = f[len(prefix):-len(ext)]
+        try:
+            nums.append(int(core))
+        except Exception:
+            pass
+    nxt = (max(nums) + 1) if nums else 1
+    return os.path.join(out_dir, f"{prefix}{nxt:04d}{ext}")
+
+def _species_label(provider, i: int) -> str:
+    # Try RealChemProvider metadata, else fallback to "S<i>"
+    name = None
+    try:
+        tbl = getattr(provider, "_species_table", None)
+        if isinstance(tbl, list) and i < len(tbl):
+            name = tbl[i].get("name") or tbl[i].get("id") or tbl[i].get("smiles")
+    except Exception:
+        pass
+    return (name or f"S{i}").replace('"', "'")
+
+def write_graphviz_dot(provider,
+                       scope: Iterable[int],
+                       sol: dict,
+                       out_dir: str = "output",
+                       title: str = "Reaction subnetwork") -> str:
+    """
+    Write a GraphViz .dot for the selected subnetwork.
+    Nodes: species (ellipse), reactions (box).
+    Colors: food blue, targets green, others white; reactions pale yellow.
+    Edges: reactant -> reaction; reaction -> product; label stoich when >1.
+    """
+    scope = list(scope)
+    if not sol.get("solved", False):
+        raise ValueError("Solution is not feasible; nothing to export.")
+    y = sol["y"]
+    v = sol["v"]
+    sel_local = [j for j, yy in enumerate(y) if yy > 0]
+    if not sel_local:
+        raise ValueError("No selected reactions in solution.")
+
+    m = provider.species_count()
+    S = provider.stoichiometry_submatrix(scope)  # (m x k)
+    parts = provider.participants_lists(scope)
+    F = set(provider.food_set())
+    T = set(provider.target_species())
+    X = provider.autocatalyst_index()
+
+    # Collect species that actually appear in selected reactions
+    species_used = set()
+    for j in sel_local:
+        for i in parts[j]:
+            species_used.add(i)
+
+    # Style constants
+    food_fill = "#CDE8FF"; food_stroke = "#1E88E5"
+    targ_fill = "#C8E6C9"; targ_stroke = "#2E7D32"
+    spec_fill = "#FFFFFF"; spec_stroke = "#000000"
+    rxn_fill  = "#FFF2CC"; rxn_stroke  = "#8D6E63"
+
+    lines = []
+    lines.append('digraph G {')
+    lines.append('  graph [rankdir=LR, fontsize=10, labelloc="t", label="%s"];' % title.replace('"', "'"))
+    lines.append('  node  [fontname="Helvetica", style=filled];')
+    lines.append('  edge  [fontname="Helvetica"];')
+    lines.append('')
+
+    # Species nodes
+    lines.append('  // Species')
+    for i in sorted(species_used):
+        label = _species_label(provider, i)
+        if i in F:
+            fill, stroke = food_fill, food_stroke
+        elif i in T:
+            fill, stroke = targ_fill, targ_stroke
+        else:
+            fill, stroke = spec_fill, spec_stroke
+        # Optional: bold outline for autocatalyst X
+        penwidth = "2" if i == X else "1"
+        lines.append(f'  S{i} [shape=ellipse, label="{label}", fillcolor="{fill}", color="{stroke}", penwidth={penwidth}];')
+    lines.append('')
+
+    # Reaction nodes
+    lines.append('  // Reactions')
+    for j in sel_local:
+        gidx = scope[j]
+        lbl = f"R{gidx} (r{j})"
+        lines.append(f'  R{gidx} [shape=box, label="{lbl}", fillcolor="{rxn_fill}", color="{rxn_stroke}"];')
+    lines.append('')
+
+    # Edges by stoichiometry
+    lines.append('  // Edges (stoichiometry)')
+    for j in sel_local:
+        gidx = scope[j]
+        # Reactants
+        for i in range(m):
+            coeff = -S[i, j]
+            if coeff > 0:
+                lab = f' [label="{int(coeff)}"]' if abs(coeff - int(coeff)) < 1e-9 and coeff > 1.0 else ''
+                lines.append(f'  S{i} -> R{gidx}{lab};')
+        # Products
+        for i in range(m):
+            coeff = S[i, j]
+            if coeff > 0:
+                lab = f' [label="{int(coeff)}"]' if abs(coeff - int(coeff)) < 1e-9 and coeff > 1.0 else ''
+                lines.append(f'  R{gidx} -> S{i}{lab};')
+
+    lines.append('}')
+    path = _next_output_path(out_dir=out_dir, prefix="network_", ext=".dot")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    return path
+
 # ------------------------------ Driver (incremental scope with logs) ------------------------------
 
 def search_best_network(provider: ChemProvider, spec: ProblemSpec, random_seed: int = 42) -> None:
@@ -593,16 +727,18 @@ def search_best_network(provider: ChemProvider, spec: ProblemSpec, random_seed: 
     print("--------------------------------------------------")
     if best is None or not best[3].get("solved", False):
         print("No feasible subnetwork found across rounds under current settings.")
-        return
+        return SearchResult(solved=False)
 
     score, it_best, scope_size, sol_best, dom_best, scope_idx = best
-    y = sol_best["y"]
-    v = sol_best["v"]
+
+    # (Optional) keep the summary prints
+    y = sol_best["y"]; v = sol_best["v"]
     selected = [j for j, yy in enumerate(y) if yy > 0]
     print("== Best subnetwork summary ==")
     print(f"Found at round {it_best} with scope size {scope_size}.")
     print(f"Selected reactions: {len(selected)}")
     print(f"Active species: {len(sol_best['active_species'])}, Consumed species: {len(sol_best['consumed_species'])}")
+    X = provider.autocatalyst_index()
     print(f"Net gain of X (species {X}): {sol_best['gainX']:.3f}")
     print(f"Dominance min ratio: {dom_best['dominance_min_ratio']:.3f}, avg ratio: {dom_best['dominance_avg_ratio']:.3f}")
     print(f"Final score: {score:.3f}")
@@ -612,6 +748,16 @@ def search_best_network(provider: ChemProvider, spec: ProblemSpec, random_seed: 
     print("Top flux reactions (local indices within scope):")
     for j, val in nonzero_v[:20]:
         print(f"  r{j}: v={val:.3f}")
+
+    return SearchResult(
+        solved=True,
+        score=score,
+        round_best=it_best,
+        scope_size=scope_size,
+        sol=sol_best,
+        dom=dom_best,
+        scope_idx=scope_idx,
+    )
 
 
 # ------------------------------ Main ------------------------------
@@ -634,4 +780,16 @@ if __name__ == "__main__":
     provider = RealChemProvider(base_dir=".")
     provider.build_reactions_from_templates(max_reactions=2000)
 
-    search_best_network(provider, spec, random_seed=42)
+    result = search_best_network(provider, spec, random_seed=42)
+
+    # Export only if solved
+    if result.solved:
+        dot_path = write_graphviz_dot(
+            provider,
+            result.scope_idx,
+            result.sol,
+            out_dir="output",
+            title=f"Best subnetwork (round {result.round_best}, scope {result.scope_size})"
+        )
+        print(f"GraphViz written to: {dot_path}")
+
