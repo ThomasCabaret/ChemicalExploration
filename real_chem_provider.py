@@ -1,5 +1,5 @@
 # real_chem_provider.py
-# RealChemProvider: file-backed ChemProvider with template expansion via simple group tags (no RDKit required).
+# RealChemProvider: file-backed ChemProvider with template expansion (no RDKit required).
 
 from __future__ import annotations
 from typing import List, Set, Dict, Optional, Tuple
@@ -12,7 +12,7 @@ import yaml
 class RealChemProvider:
     """
     File-backed ChemProvider:
-      - Species pool = FOOD ? TARGET ? INTERMEDIATES ? {H2O}
+      - Species pool = FOOD ? TARGET ?
       - Groups for template matching come from a 'groups' column (comma/semicolon-separated tags).
       - KEGG CID resolved from data/kegg_map.csv (optional). If missing, ?fG' may be None.
       - ?fG' computed from eQuilibrator pseudoisomers (SBtab TSV) via a simple pH transform.
@@ -24,12 +24,10 @@ class RealChemProvider:
         base_dir: str = ".",
         food_csv: str = "data/food_test.csv",
         targets_csv: str = "data/targets_test.csv",
-        intermediates_csv: str = "data/intermediates.csv",
         kegg_map_csv: str = "data/kegg_map.csv",
         env_yaml: str = "config/env.yaml",
-        kegg_compounds_json: str = "external/kegg_compounds.json",  # not used in no-RDKit path
+        kegg_compounds_json: str = "external/kegg_compounds.json",  # unused in SMIRKS mode
         kegg_pseudoisomers_csv: str = "external/kegg_pseudoisomers_Alberty.csv",
-        templates_yaml: str = "templates/aqueous_min.yaml",
         alpha_dominance: float = 5.0,
         max_selected: Optional[int] = 60,
         default_food_budget: float = 50.0,
@@ -42,11 +40,10 @@ class RealChemProvider:
         self.paths = {
             "food_csv": os.path.join(base_dir, food_csv),
             "targets_csv": os.path.join(base_dir, targets_csv),
-            "inter_csv": os.path.join(base_dir, intermediates_csv),
             "kegg_map_csv": os.path.join(base_dir, kegg_map_csv),
             "env_yaml": os.path.join(base_dir, env_yaml),
             "kegg_pseudoisomers_csv": os.path.join(base_dir, kegg_pseudoisomers_csv),
-            "templates_yaml": os.path.join(base_dir, templates_yaml),
+            # no legacy templates path anymore
         }
 
         self.env = self._load_env(self.paths["env_yaml"])
@@ -55,27 +52,41 @@ class RealChemProvider:
         self.I = float(self.env.get("ionic_strength_M", 0.1))
         self.R = 8.314462618e-3  # kJ/mol/K
 
-        self.templates = self._load_templates(self.paths["templates_yaml"])
+        # Engine: SMIRKS feed-forward only
+        self.engine = str(self.env.get("engine", "smirks")).lower().strip()
+        self.max_depth = int(self.env.get("max_depth", 4))
+        self.smirks_rules_path = str(self.env.get("smirks_rules", "templates/smirks_rules.yaml"))
+
+        if self.engine == "smirks":
+            self.smirks_rules = self._load_templates(os.path.join(base_dir, self.smirks_rules_path))
+            self._indigo = None
+            try:
+                from indigo import Indigo
+                self._indigo = Indigo()  # no RPE options needed; we only canonicalize SMILES
+            except Exception as e:
+                raise RuntimeError("Indigo is required for SMIRKS engine. Install: pip install epam.indigo") from e
+        else:
+            print("[WARN] Unknown engine (use 'smirks'). Proceeding with empty network.")
+            self.smirks_rules = {"rules": []}
+            self._indigo = None
+
         self.pseudo_table = self._load_pseudoisomers(self.paths["kegg_pseudoisomers_csv"])
         self.map_by_smiles, self.map_by_name = self._load_kegg_map(self.paths["kegg_map_csv"])
 
-        species_rows = self._load_species(self.paths["food_csv"], self.paths["targets_csv"], self.paths["inter_csv"])
+        species_rows = self._load_species(self.paths["food_csv"], self.paths["targets_csv"])
         self._species_table = self._finalize_species(species_rows)
         self._m = len(self._species_table)
 
         self._food_indices = {i for i, r in enumerate(self._species_table) if r["is_food"]}
         self._target_indices = {i for i, r in enumerate(self._species_table) if r["is_target"]}
-        self._groups_by_idx: List[Set[str]] = [set(r.get("groups", [])) for r in self._species_table]
 
-        # autocatalyst X: prefer first target, else first non-food
         self._X = self._choose_autocatalyst_index()
 
-        # Food budgets
         self._food_budget = np.zeros(self._m, dtype=float)
         for i in self._food_indices:
             self._food_budget[i] = float(self.env.get("food_budget", default_food_budget))
 
-        # Placeholders for reaction matrices
+        # Empty reaction matrices (to be filled by build_reactions_from_smirks)
         self._S = np.zeros((self._m, 0), dtype=float)
         self._U = np.zeros(0, dtype=float)
         self._delta_rG = np.zeros(0, dtype=float)
@@ -83,6 +94,7 @@ class RealChemProvider:
         self._participants_all: List[List[int]] = []
         self._usesX_all = np.zeros(0, dtype=bool)
         self._consumes = np.maximum(-self._S, 0.0)
+
 
     # -------------------- I/O helpers --------------------
     @staticmethod
@@ -123,29 +135,18 @@ class RealChemProvider:
                     by_name[name] = cid
         return by_smi, by_name
 
-    def _load_species(self, food_csv: str, targets_csv: str, inter_csv: str) -> List[Dict]:
+    def _load_species(self, food_csv: str, targets_csv: str) -> List[Dict]:
         def read_csv(path: str) -> pd.DataFrame:
-            return self._load_csv_if_exists(path, ("id", "name", "smiles", "groups"))
+            return self._load_csv_if_exists(path, ("id", "name", "smiles"))
 
-        foods = read_csv(food_csv); foods["is_food"] = True; foods["is_target"] = False
+        foods = read_csv(food_csv); foods["is_food"] = True;  foods["is_target"] = False
         targs = read_csv(targets_csv); targs["is_food"] = False; targs["is_target"] = True
-        inters = read_csv(inter_csv); inters["is_food"] = False; inters["is_target"] = False
 
-        df = pd.concat([foods, targs, inters], ignore_index=True)
+        df = pd.concat([foods, targs], ignore_index=True)
 
-        # Ensure water present
-        water = pd.DataFrame([{"id": "H2O", "name": "water", "smiles": "O", "groups": "", "is_food": False, "is_target": False}])
+        # Ensure water present (non-food by default; make it food in CSV if you need buffered H2O)
+        water = pd.DataFrame([{"id": "H2O", "name": "water", "smiles": "O", "is_food": False, "is_target": False}])
         df = pd.concat([df, water], ignore_index=True)
-
-        # Normalize groups
-        def parse_groups(s: str) -> List[str]:
-            s = str(s or "").strip()
-            if not s:
-                return []
-            parts = [p.strip() for p in s.replace(";", ",").split(",")]
-            return [p for p in parts if p]
-
-        df["groups_list"] = df["groups"].map(parse_groups)
 
         # Deduplicate by SMILES (keep first occurrence)
         seen = set(); rows: List[Dict] = []
@@ -158,11 +159,11 @@ class RealChemProvider:
                 "id": str(r.get("id", r.get("name", ""))),
                 "name": str(r.get("name", "")),
                 "smiles": smi,
-                "groups": r.get("groups_list", []),
                 "is_food": bool(r.get("is_food", False)),
                 "is_target": bool(r.get("is_target", False)),
             })
         return rows
+
 
     def _finalize_species(self, rows: List[Dict]) -> List[Dict]:
         out: List[Dict] = []
@@ -173,10 +174,40 @@ class RealChemProvider:
             out.append({
                 "id": r["id"], "name": name, "smiles": smi,
                 "kegg_cid": cid, "dgfprime_kjmol": dgf,
-                "groups": list(r.get("groups", [])),
                 "is_food": bool(r["is_food"]), "is_target": bool(r["is_target"]),
             })
         return out
+
+
+    # -------------------- smirks helpers --------------------
+    def _canonical_smiles(self, smi: str) -> str:
+        try:
+            m = self._indigo.loadMolecule(smi)
+            return m.canonicalSmiles()
+        except Exception:
+            return smi.strip()
+
+    def _add_species_from_smiles(self, smi: str, name_hint: Optional[str] = None) -> int:
+        csmi = self._canonical_smiles(smi)
+        for idx, r in enumerate(self._species_table):
+            if r.get("smiles", "") == csmi:
+                return idx
+        entry = {
+            "id": f"AUTO_{len(self._species_table)}",
+            "name": name_hint or csmi,
+            "smiles": csmi,
+            "kegg_cid": None,
+            "dgfprime_kjmol": None,
+            "is_food": False,
+            "is_target": False,
+        }
+        self._species_table.append(entry)
+        self._m = len(self._species_table)
+        if self._food_budget.shape[0] < self._m:
+            pad = self._m - self._food_budget.shape[0]
+            self._food_budget = np.pad(self._food_budget, (0, pad))
+        return self._m - 1
+
 
     # -------------------- pseudoisomers (SBtab) --------------------
     @staticmethod
@@ -305,58 +336,89 @@ class RealChemProvider:
     def delta_rG_all(self) -> np.ndarray:
         return self._delta_rG.copy()
 
-    def _add_placeholder_species(self, group: str) -> int:
-        # Create a synthetic species carrying the given group tag.
-        entry = {
-            "id": f"GEN_{group.upper()}",
-            "name": f"gen_{group}",
-            "smiles": f"[{group}]",
-            "kegg_cid": None,
-            "dgfprime_kjmol": None,
-            "groups": [group],
-            "is_food": False,
-            "is_target": False,
-        }
-        self._species_table.append(entry)
-        self._groups_by_idx.append(set(entry["groups"]))
-        self._m = len(self._species_table)
-        # extend food budget vector if needed
-        if self._food_budget.shape[0] < self._m:
-            pad = self._m - self._food_budget.shape[0]
-            self._food_budget = np.pad(self._food_budget, (0, pad))
-        return self._m - 1
+    # -------------------- Reaction generation from SMILES rules (feed-forward) --------------------
+    def build_reactions_from_smirks(self, max_reactions: int = 5000) -> None:
+        """
+        Feed-forward expansion using a rule file (config/env.yaml -> smirks_rules).
+        Supports rules that give explicit reactant/product SMILES:
+          - id: ...
+            reversible: false
+            reactants_smiles: ["SMI_A", "SMI_B"]   # 1 or 2 reactants supported
+            products_smiles:  ["SMI_C", "SMI_D"]
+        Unknown species are auto-added as non-food/non-target.
+        """
+        if self.engine != "smirks":
+            print("[WARN] Engine is not 'smirks'; no reactions will be built.")
+            self._S = np.zeros((self._m, 0), dtype=float)
+            self._U = np.zeros(0, dtype=float)
+            self._delta_rG = np.zeros(0, dtype=float)
+            self._allowed_global = np.zeros(0, dtype=bool)
+            self._participants_all = []
+            self._usesX_all = np.zeros(0, dtype=bool)
+            self._consumes = np.maximum(-self._S, 0.0)
+            return
 
-    # -------------------- Reaction generation from templates --------------------
-    def build_reactions_from_templates(self, max_reactions: int = 5000) -> None:
-        # 0) Ensure product-side groups exist as species (create placeholders if missing)
-        product_groups = set()
-        for tpl in self.templates.get("templates", []):
-            for ps in tpl.get("products", []):
-                if "group" in ps:
-                    product_groups.add(str(ps["group"]).strip())
+        rules = self.smirks_rules.get("rules", [])
+        if not isinstance(rules, list):
+            print("[WARN] smirks_rules.yaml has no 'rules' list; no reactions built.")
+            rules = []
 
-        present_groups = set()
-        for tags in self._groups_by_idx:
-            present_groups |= set(tags)
+        # Fast lookup for species by canonical SMILES
+        smi_to_idx: Dict[str, int] = {}
+        for idx, r in enumerate(self._species_table):
+            smi_to_idx[self._canonical_smiles(r["smiles"])] = idx
 
-        for g in sorted(product_groups):
-            if g and g not in present_groups:
-                self._add_placeholder_species(g)
+        def ensure_species(smi: str, name_hint: Optional[str] = None) -> int:
+            csmi = self._canonical_smiles(smi)
+            if csmi in smi_to_idx:
+                return smi_to_idx[csmi]
+            new_idx = self._add_species_from_smiles(csmi, name_hint=name_hint)
+            smi_to_idx[csmi] = new_idx
+            return new_idx
 
-        # 1) Build index by group (after possible additions)
-        by_group: Dict[str, List[int]] = {}
-        for idx, tags in enumerate(self._groups_by_idx):
-            for g in tags:
-                by_group.setdefault(g, []).append(idx)
+        # First pass: only collect (reactants_idx, products_idx) pairs,
+        # so we can add species freely and build columns later with final m.
+        rxn_pairs: List[Tuple[List[int], List[int]]] = []
 
-        # Helper to resolve literal molecules
-        def resolve_literal(mol_label: str) -> Optional[int]:
-            if mol_label == "O":
-                for i, r in enumerate(self._species_table):
-                    if r["smiles"] == "O":
-                        return i
-            return None
+        for rule in rules:
+            rsmis = rule.get("reactants_smiles") or rule.get("reactants") or []
+            psmis = rule.get("products_smiles") or rule.get("products") or []
+            reversible = bool(rule.get("reversible", False))
 
+            if not rsmis or not psmis:
+                sm = rule.get("smirks", None)
+                if sm:
+                    print(f"[INFO] Skipping SMIRKS-only rule '{rule.get('id','?')}' (no explicit reactant/product SMILES).")
+                continue
+
+            rsmis_c = [self._canonical_smiles(s) for s in rsmis]
+            psmis_c = [self._canonical_smiles(s) for s in psmis]
+
+            # Make sure product species exist
+            prod_idx_vec = [ensure_species(s) for s in psmis_c]
+
+            if len(rsmis_c) == 1:
+                i0 = ensure_species(rsmis_c[0])
+                rxn_pairs.append(([i0], prod_idx_vec))
+                if reversible:
+                    rxn_pairs.append((prod_idx_vec, [i0]))
+
+            elif len(rsmis_c) == 2:
+                i0 = ensure_species(rsmis_c[0])
+                i1 = ensure_species(rsmis_c[1])
+                if i0 != i1:
+                    rxn_pairs.append(([i0, i1], prod_idx_vec))
+                    if reversible:
+                        rxn_pairs.append((prod_idx_vec, [i0, i1]))
+            else:
+                print(f"[INFO] Rule '{rule.get('id','?')}' has arity {len(rsmis_c)}; skipping.")
+                continue
+
+            if len(rxn_pairs) >= max_reactions:
+                break
+
+        # Second pass: build matrices at the FINAL species count
+        m = self._m
         S_cols: List[np.ndarray] = []
         U_list: List[float] = []
         drg_list: List[float] = []
@@ -364,93 +426,47 @@ class RealChemProvider:
         participants: List[List[int]] = []
         usesX: List[bool] = []
 
-        m = self._m
-
-        for tpl in self.templates.get("templates", []):
-            reactant_specs = tpl.get("reactants", [])
-            product_specs = tpl.get("products", [])
-            reversible = bool(tpl.get("reversible", True))
-
-            # Expand reactants
-            reactant_sets: List[List[int]] = []
-            for rs in reactant_specs:
-                if "group" in rs:
-                    g = str(rs["group"]).strip()
-                    reactant_sets.append(list(by_group.get(g, [])))
-                elif "molecule" in rs:
-                    idx = resolve_literal(str(rs["molecule"]).strip())
-                    reactant_sets.append([idx] if idx is not None else [])
+        def drg_of(col_vec: np.ndarray) -> Tuple[float, bool]:
+            # ?rG' = sum(nu_i * ?fG'_i) with nu>0 for products, nu<0 for reactants
+            dgf = [sp.get("dgfprime_kjmol", None) for sp in self._species_table]
+            have_all = True
+            delta = 0.0
+            for i, nu in enumerate(col_vec):
+                if abs(nu) < 1e-12:
+                    continue
+                if dgf[i] is None:
+                    have_all = False
                 else:
-                    reactant_sets.append([])
+                    delta += float(nu) * float(dgf[i])
+            if not have_all:
+                return 0.0, True
+            return float(delta), (delta <= 0.0)
 
-            # Expand products
-            product_sets: List[List[int]] = []
-            for ps in product_specs:
-                if "group" in ps:
-                    g = str(ps["group"]).strip()
-                    product_sets.append(list(by_group.get(g, [])))
-                elif "molecule" in ps:
-                    idx = resolve_literal(str(ps["molecule"]).strip())
-                    product_sets.append([idx] if idx is not None else [])
-                else:
-                    product_sets.append([])
-
-            if any(len(c) == 0 for c in reactant_sets + product_sets):
+        for react_idx, prod_idx in rxn_pairs[:max_reactions]:
+            col = np.zeros(m, dtype=float)
+            for i in react_idx:
+                if 0 <= i < m:
+                    col[i] -= 1.0
+            for i in prod_idx:
+                if 0 <= i < m:
+                    col[i] += 1.0
+            if np.allclose(col, 0.0):
                 continue
 
-            def combos(sets: List[List[int]]) -> List[Tuple[int, ...]]:
-                if len(sets) == 1:
-                    return [(i,) for i in sets[0]]
-                if len(sets) == 2:
-                    a, b = sets
-                    return [(i, j) for i in a for j in b if i != j]
-                return []
+            drg, allowed = drg_of(col)
+            S_cols.append(col)
+            U_list.append(float(self.rng.uniform(1.0, 10.0)))
+            drg_list.append(drg)
+            allowed_list.append(allowed)
+            parts = sorted(list(set(react_idx + prod_idx)))
+            participants.append(parts)
+            usesX.append(col[self._X] < 0.0)
 
-            reactant_combos = combos(reactant_sets)
-            product_combos = combos(product_sets)
-
-            for r_tuple in reactant_combos:
-                for p_tuple in product_combos:
-                    col = np.zeros(m, dtype=float)
-                    for i in r_tuple:
-                        col[i] -= 1.0
-                    for i in p_tuple:
-                        col[i] += 1.0
-                    if np.allclose(col, 0.0):
-                        continue
-
-                    dgf = [self._species_table[i].get("dgfprime_kjmol", None) for i in range(m)]
-                    if all(dgf[i] is not None for i in p_tuple + r_tuple):
-                        drg = float(sum(dgf[i] for i in p_tuple) - sum(dgf[i] for i in r_tuple))
-                        allowed = (drg <= 0.0)
-                    else:
-                        # Unknown thermo: allow for now; MILP will decide with other constraints.
-                        drg = 0.0
-                        allowed = True
-
-                    S_cols.append(col)
-                    U_list.append(float(self.rng.uniform(1.0, 10.0)))
-                    drg_list.append(drg)
-                    allowed_list.append(allowed)
-                    parts = sorted(list(set(list(r_tuple) + list(p_tuple))))
-                    participants.append(parts)
-                    usesX.append(col[self._X] < 0.0)
-
-                    if len(S_cols) >= max_reactions:
-                        break
-                if len(S_cols) >= max_reactions:
-                    break
-            if len(S_cols) >= max_reactions:
-                break
-
-            if reversible:
-                pass  # keep only the forward copy for now
-
-        # Materialize matrices
         if S_cols:
             S = np.stack(S_cols, axis=1)
         else:
             S = np.zeros((m, 0), dtype=float)
+
         self._S = S
         self._U = np.array(U_list, dtype=float)
         self._delta_rG = np.array(drg_list, dtype=float)
@@ -458,6 +474,9 @@ class RealChemProvider:
         self._participants_all = participants
         self._usesX_all = np.array(usesX, dtype=bool)
         self._consumes = np.maximum(-self._S, 0.0)
+
+        print(f"[SMIRKS] Built reactions: k={self._S.shape[1]} | species m={self._m}")
+
 
     # -------------------- internals --------------------
     def _choose_autocatalyst_index(self) -> int:

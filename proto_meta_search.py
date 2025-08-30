@@ -386,11 +386,13 @@ class SubnetworkMILP:
 
         gainX_expr = lpSum(S[X, j] * v[j] for j in range(k))
         model += gainX_expr >= self.spec.eps_gain_X
+        # RELAX: do not require any reaction to consume X for now
         idx_uses_x = [j for j in range(k) if usesX[j]]
-        if idx_uses_x:
-            model += lpSum(y[j] for j in idx_uses_x) >= 1
-        else:
-            return {"status": "NO_X_CONSUMER_IN_SCOPE", "solved": False}
+        # (constraint intentionally disabled)
+        # if idx_uses_x:
+        #     model += lpSum(y[j] for j in idx_uses_x) >= 1
+        # else:
+        #     return {"status": "NO_X_CONSUMER_IN_SCOPE", "solved": False}
 
         for i in range(m):
             Ci = consumes[i, :]
@@ -778,7 +780,7 @@ if __name__ == "__main__":
 
     from real_chem_provider import RealChemProvider
     provider = RealChemProvider(base_dir=".")
-    provider.build_reactions_from_templates(max_reactions=2000)
+    provider.build_reactions_from_smirks(max_reactions=2000)
 
     result = search_best_network(provider, spec, random_seed=42)
 
