@@ -32,6 +32,13 @@
 +-- output/                   # Output directory for GraphViz .dot files
 ```
 
+ABOUT REDESIGN ONGOING
+Policy summary (architecture): We use a two-phase workflow. Phase 1 is an offline generation step that runs inside the RMG-Py Docker image to enumerate species and reactions from a whitelisted set of reaction families; it outputs static CSVs (species and reactions with Arrhenius parameters). Phase 2 is the online network search in this repository: it loads those CSVs and runs the MILP-based solver. RDKit is not used in the search phase. Thermodynamics are computed by the provider at runtime (with temperature, pH, and ionic-strength corrections); when needed it can fall back to the baseline thermo attached to RMG species. Kinetics are taken from the RMG-generated Arrhenius parameters; the provider evaluates k(T) and maps it to physical capacity bounds used by the solver. This separation keeps generation costs out of the solver loop, while allowing us to refine chemistry (families/filters) and environment models (thermo corrections) independently.
+
+##
+Offline reaction/species generation with RMG-Py (Docker, Windows). Species and reactions are generated inside a Docker image of RMG-Py and written back into the repository. One-time setup: install Docker Desktop for Windows (use Linux containers) and pull the image with: docker pull reactionmechanismgenerator/rmg:3.3.0 . Per-generation (interactive) run: open PowerShell, then docker run --rm -it -e RMG_INPUT_DIR=/rmgdb/input -v "C:\CodeProjects\ChemicalExploration\external\RMG-database\input:/rmgdb/input" -v "C:\CodeProjects\ChemicalExploration:/work" reactionmechanismgenerator/rmg:3.3.0 . At the container prompt, launch the generator: python /work/rmg_generate.py --rmg-input-dir /rmgdb/input --food-csv /work/data/food.csv --out-dir /work/out --families Ketoenol --max-depth 1 . The generator will write /work/out/species.csv and /work/out/reactions_kinetics.csv (on Windows: C:\CodeProjects\ChemicalExploration\out\species.csv and C:\CodeProjects\ChemicalExploration\out\reactions_kinetics.csv). Replace the family list (e.g., add CO_Disproportionation, H_Abstraction, etc.) and other flags to suit your chemistry; files referenced by the generator must be UTF-8 encoded. To exit the container, type exit.
+
+
 ## Setup
 
 This project requires a Conda environment to manage dependencies, particularly RDKit.
