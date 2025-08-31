@@ -22,12 +22,13 @@ class RealChemProvider:
     def __init__(
         self,
         base_dir: str = ".",
-        food_csv: str = "data/food_test.csv",
+        food_csv: str = "data/food.csv",
         targets_csv: str = "data/targets_test.csv",
         kegg_map_csv: str = "data/kegg_map.csv",
         env_yaml: str = "config/env.yaml",
         kegg_compounds_json: str = "external/kegg_compounds.json",  # unused here
         kegg_pseudoisomers_csv: str = "external/kegg_pseudoisomers_Alberty.csv",
+        rmg_input_dir: str = "external/RMG-database/input",
         alpha_dominance: float = 5.0,
         max_selected: Optional[int] = 60,
         default_food_budget: float = 50.0,
@@ -43,6 +44,7 @@ class RealChemProvider:
             "kegg_map_csv": os.path.join(base_dir, kegg_map_csv),
             "env_yaml": os.path.join(base_dir, env_yaml),
             "kegg_pseudoisomers_csv": os.path.join(base_dir, kegg_pseudoisomers_csv),
+            "rmg_input": os.path.join(base_dir, rmg_input_dir),
         }
 
         self.env = self._load_env(self.paths["env_yaml"])
@@ -51,13 +53,11 @@ class RealChemProvider:
         self.I = float(self.env.get("ionic_strength_M", 0.1))
         self.R = 8.314462618e-3  # kJ/mol/K
 
-        # RDKit-only: still load rules file for RDKit templates
-        self.smirks_rules_path = str(self.env.get("smirks_rules", "templates/smirks_rules.yaml"))
-        self.smirks_rules = self._load_templates(os.path.join(base_dir, self.smirks_rules_path))
-
+        # Thermo data
         self.pseudo_table = self._load_pseudoisomers(self.paths["kegg_pseudoisomers_csv"])
         self.map_by_smiles, self.map_by_name = self._load_kegg_map(self.paths["kegg_map_csv"])
 
+        # Species
         species_rows = self._load_species(self.paths["food_csv"], self.paths["targets_csv"])
         self._species_table = self._finalize_species(species_rows)
         self._m = len(self._species_table)
@@ -71,7 +71,7 @@ class RealChemProvider:
         for i in self._food_indices:
             self._food_budget[i] = float(self.env.get("food_budget", default_food_budget))
 
-        # Initialize empty reaction matrices
+        # Reaction matrices
         self._S = np.zeros((self._m, 0), dtype=float)
         self._U = np.zeros(0, dtype=float)
         self._delta_rG = np.zeros(0, dtype=float)
@@ -79,6 +79,12 @@ class RealChemProvider:
         self._participants_all: List[List[int]] = []
         self._usesX_all = np.zeros(0, dtype=bool)
         self._consumes = np.maximum(-self._S, 0.0)
+
+        # RMG database handle (lazy-loaded)
+        self._rmg_db = None
+        self._rmg_available = False
+        self._init_rmg_database(self.paths["rmg_input"])
+
 
 
     # -------------------- I/O helpers --------------------
@@ -263,6 +269,45 @@ class RealChemProvider:
             if col not in df.columns: df[col] = np.nan
         return df[["cid","name","dg_chem_kjmol","nH","charge","nMg","note"]]
 
+    # -------------------- RMG --------------------
+    def _load_rmg_families(self, families_dir: str) -> List[Dict]:
+        """
+        Parse RMG family directories to extract templates as SMIRKS rules.
+        For now, we do a naive scan of `groups.py` and `reaction.py` looking
+        for lines with 'smarts' or 'smirks'.
+        """
+        rules: List[Dict] = []
+        if not os.path.isdir(families_dir):
+            print(f"[WARN] RMG families dir not found: {families_dir}")
+            return rules
+
+        for fam in os.listdir(families_dir):
+            fam_dir = os.path.join(families_dir, fam)
+            if not os.path.isdir(fam_dir):
+                continue
+            rule_id = fam
+            smirks_list: List[str] = []
+            for fname in ["groups.py", "reaction.py"]:
+                fpath = os.path.join(fam_dir, fname)
+                if not os.path.isfile(fpath):
+                    continue
+                with open(fpath, "r", encoding="utf-8") as f:
+                    for line in f:
+                        if "smarts" in line.lower() or "smirks" in line.lower():
+                            txt = line.split("=", 1)[-1].strip().strip(",").strip("'\"")
+                            if txt:
+                                smirks_list.append(txt)
+            for s in smirks_list:
+                rules.append({
+                    "id": rule_id,
+                    "smirks": s,
+                    "reversible": False,
+                    "max_pairs": 2000,
+                    "max_outcomes_per_pair": 8,
+                })
+        print(f"[RMG] Loaded {len(rules)} SMIRKS templates from {families_dir}")
+        return rules
+
     # -------------------- ?fG' transform --------------------
     def _dgfprime_from_pseudoisomers(self, cid: Optional[str]) -> Optional[float]:
         if not cid or self.pseudo_table.empty:
@@ -337,16 +382,12 @@ class RealChemProvider:
         max_outcomes_per_pair_default: int = 8,
     ) -> None:
         """
-        RDKit reaction expansion from SMIRKS in smirks_rules.yaml.
-        IMPORTANT: We run on molecules with implicit hydrogens to avoid valence
-        explosions when SMIRKS also constrain H counts (e.g., ;H1, ;H2, ;H3).
-        Products are sanitized; explicit H in products (e.g., [O][H]) are removed
-        for canonical SMILES.
+        RDKit reaction expansion from SMIRKS templates parsed from RMG database.
         """
 
-        rules = self.smirks_rules.get("rules", [])
-        if not isinstance(rules, list):
-            print("[WARN] smirks_rules.yaml has no 'rules' list; no reactions built.")
+        rules = self.rmg_rules
+        if not isinstance(rules, list) or not rules:
+            print("[WARN] No RMG rules available; no reactions built.")
             rules = []
 
         # Canonical SMILES map and molecule cache (IMPLICIT H)

@@ -1,2 +1,2 @@
-id,name,smiles
-HXAm,hexanamide,CCCCCC(=O)N
+id,name,smiles,headgroup,chain_c_total,unsaturation,demand_min,weight,groups
+FA6,hexanoic_acid,CCCCCC(=O)O,carboxylate,6,0,1.0,1.0,carboxylic_acid
