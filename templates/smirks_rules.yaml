@@ -1,109 +1,23 @@
-# Minimal SMIRKS rules for forward enumeration (aqueous CHNOPS)
-# NOTE:
-# - These are simplified, generic transforms intended for initial testing.
-# - Stoichiometry is handled by including H2O in the right places; hydrogens are implicit.
-# - You will likely refine atom mapping/charges later.
-
 version: 0
 rules:
 
-  # --- Hydrolyses (forward: consume H2O) ---
-
-  - id: ester_hydrolysis
-    family: hydrolysis
+  - id: thioesterification_template
     reversible: false
-    smirks: "[C:1](=O)[O:2][C:3].[O:4][H]>>[C:1](=O)[O:4][H].[O:2][C:3]"
-    notes: "Ester + H2O -> Carboxylic acid + Alcohol"
+    smirks: "[C:1](=O)[O;H1:2].[S;H1:3][C:4]>>[C:1](=O)[S:3][C:4].[O:2]"
+    max_pairs: 32
+    max_outcomes_per_pair: 4
+    notes: "Matches generic acid OH and generic thiol SH"
 
-  - id: thioester_hydrolysis
-    family: hydrolysis
+  - id: thioester_to_amide_with_ammonia
     reversible: false
-    smirks: "[C:1](=O)[S:2][C:3].[O:4][H]>>[C:1](=O)[O:4][H].[S:2][C:3]"
-    notes: "Thioester + H2O -> Carboxylic acid + Thiol"
+    smirks: "[C:1](=O)[S:2][C:3].[N;H3:4]>>[C:1](=O)[N;H2:4].[S;H1:2][C:3]"
+    max_pairs: 64
+    max_outcomes_per_pair: 4
+    notes: "Consumes one H from N and gives it to S (leaving group)"
 
-  - id: amide_hydrolysis
-    family: hydrolysis
+  - id: thioester_to_amide_with_primary_amine
     reversible: false
-    smirks: "[C:1](=O)[N:2].[O:3][H]>>[C:1](=O)[O:3][H].[N:2]"
-    notes: "Amide + H2O -> Carboxylic acid + Amine"
-
-  # --- Condensations (produce H2O) ---
-
-  - id: esterification
-    family: acyl_transfer
-    reversible: true
-    smirks: "[C:1](=O)[O:2][H].[O:3][C:4]>>[C:1](=O)[O:3][C:4].[O:2][H]"
-    notes: "Acid + Alcohol -> Ester + H2O (reverse is hydrolysis)"
-
-  - id: thioesterification
-    family: acyl_transfer
-    reversible: true
-    smirks: "[C:1](=O)[O:2][H].[S:3][C:4]>>[C:1](=O)[S:3][C:4].[O:2][H]"
-    notes: "Acid + Thiol -> Thioester + H2O (generic thiol)"
-
-  # --- Acyl transfer (drives amide formation without adding H2O explicitly) ---
-
-  - id: acyl_transfer_thioester_to_amide
-    family: acyl_transfer
-    reversible: false
-    smirks: "[C:1](=O)[S:2][C:3].[N:4]>>[C:1](=O)[N:4].[S:2][C:3]"
-    notes: "Thioester + Amine -> Amide + Thiol (generic primary amine)"
-
-  # --- Acid/base speciation (simple, helps aqueous gating) ---
-
-  - id: acid_deprotonation
-    family: acid_base
-    reversible: true
-    smirks: "[C:1](=O)[O:2][H]>>[C:1](=O)[O:2-].[H+]"
-    notes: "Carboxylic acid <-> carboxylate + H+ (simplified)"
-
-  - id: amine_protonation
-    family: acid_base
-    reversible: true
-    smirks: "[N:1]>>[N+:1][H]"
-    notes: "Amine <-> ammonium (simplified)"
-
-  - id: thiol_deprotonation
-    family: acid_base
-    reversible: true
-    smirks: "[S:1][H]>>[S-:1].[H+]"
-    notes: "Thiol <-> thiolate (simplified)"
-
-  # --- Disulfide / redox placeholders (optional simple variants) ---
-
-  - id: disulfide_formation
-    family: redox_placeholder
-    reversible: true
-    smirks: "[S:1][H].[S:2][H]>>[S:1][S:2].[H][H]"
-    notes: "2 R-SH <-> R-S-S-R + H2 (very simplified placeholder)"
-
-  # --- Very simple "activation" placeholders (use sparingly) ---
-
-  - id: hydrate_of_aldehyde
-    family: addition_elimination
-    reversible: true
-    smirks: "[C:1](=O)[H].[O:2][H]>>[C:1](O[H])[O:2][H]"
-    notes: "Aldehyde + H2O <-> gem-diol (simplified)"
-
-  - id: imine_hydrolysis
-    family: hydrolysis
-    reversible: true
-    smirks: "[C:1]=[N:2].[O:3][H]>>[C:1]=O.[N:2][H]"
-    notes: "Imine + H2O <-> Carbonyl + Amine (simplified)"
-
-  # Hexanoic acid + ethanethiol -> hexanoyl S-ethyl thioester + water
-  - id: thioester_hexanoate_ethanethiol
-    reversible: false
-    reactants_smiles: ["CCCCCC(=O)O", "CCS"]
-    products_smiles:  ["CCCCCC(=O)SCC", "O"]
-
-  # Hexanoyl S-ethyl thioester + ammonia -> hexanamide + ethanethiol
-  - id: acyl_transfer_hexanoyl_thioester_to_amide
-    reversible: false
-    reactants_smiles: ["CCCCCC(=O)SCC", "N"]
-    products_smiles:  ["CCCCCC(=O)N",   "CCS"]
-
-  - id: ester_hexanoate_ethanol
-    reversible: true
-    reactants_smiles: ["CCCCCC(=O)O", "CCO"]
-    products_smiles:  ["CCCCCC(=O)OCC", "O"]
+    smirks: "[C:1](=O)[S:2][C:3].[N;H2:4]>>[C:1](=O)[N;H1:4].[S;H1:2][C:3]"
+    max_pairs: 64
+    max_outcomes_per_pair: 4
+    notes: "Generic primary amine; N loses one H, S gains one H"

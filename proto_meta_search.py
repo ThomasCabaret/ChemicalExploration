@@ -780,7 +780,7 @@ if __name__ == "__main__":
 
     from real_chem_provider import RealChemProvider
     provider = RealChemProvider(base_dir=".")
-    provider.build_reactions_from_smirks(max_reactions=2000)
+    provider.build_reactions_from_templates_rdkit(max_reactions=2000)
 
     result = search_best_network(provider, spec, random_seed=42)
 

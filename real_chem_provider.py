@@ -7,7 +7,8 @@ import os, math, json
 import numpy as np
 import pandas as pd
 import yaml
-
+from rdkit import Chem
+from rdkit.Chem import rdChemReactions
 
 class RealChemProvider:
     """
@@ -26,7 +27,7 @@ class RealChemProvider:
         targets_csv: str = "data/targets_test.csv",
         kegg_map_csv: str = "data/kegg_map.csv",
         env_yaml: str = "config/env.yaml",
-        kegg_compounds_json: str = "external/kegg_compounds.json",  # unused in SMIRKS mode
+        kegg_compounds_json: str = "external/kegg_compounds.json",  # unused here
         kegg_pseudoisomers_csv: str = "external/kegg_pseudoisomers_Alberty.csv",
         alpha_dominance: float = 5.0,
         max_selected: Optional[int] = 60,
@@ -43,7 +44,6 @@ class RealChemProvider:
             "kegg_map_csv": os.path.join(base_dir, kegg_map_csv),
             "env_yaml": os.path.join(base_dir, env_yaml),
             "kegg_pseudoisomers_csv": os.path.join(base_dir, kegg_pseudoisomers_csv),
-            # no legacy templates path anymore
         }
 
         self.env = self._load_env(self.paths["env_yaml"])
@@ -52,23 +52,13 @@ class RealChemProvider:
         self.I = float(self.env.get("ionic_strength_M", 0.1))
         self.R = 8.314462618e-3  # kJ/mol/K
 
-        # Engine: SMIRKS feed-forward only
+        # Engine: "smirks" = explicit rules; "rdkit" = template expansion
         self.engine = str(self.env.get("engine", "smirks")).lower().strip()
-        self.max_depth = int(self.env.get("max_depth", 4))
+        self.max_depth = int(self.env.get("max_depth", 1))  # not used in this light path
         self.smirks_rules_path = str(self.env.get("smirks_rules", "templates/smirks_rules.yaml"))
 
-        if self.engine == "smirks":
-            self.smirks_rules = self._load_templates(os.path.join(base_dir, self.smirks_rules_path))
-            self._indigo = None
-            try:
-                from indigo import Indigo
-                self._indigo = Indigo()  # no RPE options needed; we only canonicalize SMILES
-            except Exception as e:
-                raise RuntimeError("Indigo is required for SMIRKS engine. Install: pip install epam.indigo") from e
-        else:
-            print("[WARN] Unknown engine (use 'smirks'). Proceeding with empty network.")
-            self.smirks_rules = {"rules": []}
-            self._indigo = None
+        # Load rule file (used by both explicit and template modes)
+        self.smirks_rules = self._load_templates(os.path.join(base_dir, self.smirks_rules_path))
 
         self.pseudo_table = self._load_pseudoisomers(self.paths["kegg_pseudoisomers_csv"])
         self.map_by_smiles, self.map_by_name = self._load_kegg_map(self.paths["kegg_map_csv"])
@@ -86,7 +76,7 @@ class RealChemProvider:
         for i in self._food_indices:
             self._food_budget[i] = float(self.env.get("food_budget", default_food_budget))
 
-        # Empty reaction matrices (to be filled by build_reactions_from_smirks)
+        # Empty reaction matrices (to be filled later)
         self._S = np.zeros((self._m, 0), dtype=float)
         self._U = np.zeros(0, dtype=float)
         self._delta_rG = np.zeros(0, dtype=float)
@@ -94,6 +84,7 @@ class RealChemProvider:
         self._participants_all: List[List[int]] = []
         self._usesX_all = np.zeros(0, dtype=bool)
         self._consumes = np.maximum(-self._S, 0.0)
+
 
 
     # -------------------- I/O helpers --------------------
@@ -182,10 +173,18 @@ class RealChemProvider:
     # -------------------- smirks helpers --------------------
     def _canonical_smiles(self, smi: str) -> str:
         try:
-            m = self._indigo.loadMolecule(smi)
-            return m.canonicalSmiles()
+            mol = Chem.MolFromSmiles(smi)
+            if mol is None:
+                return smi.strip()
+            return Chem.MolToSmiles(mol, canonical=True, isomericSmiles=True)
         except Exception:
             return smi.strip()
+
+    def _mol_from_smiles(self, smi: str):
+        try:
+            return Chem.MolFromSmiles(smi)
+        except Exception:
+            return None
 
     def _add_species_from_smiles(self, smi: str, name_hint: Optional[str] = None) -> int:
         csmi = self._canonical_smiles(smi)
@@ -476,6 +475,253 @@ class RealChemProvider:
         self._consumes = np.maximum(-self._S, 0.0)
 
         print(f"[SMIRKS] Built reactions: k={self._S.shape[1]} | species m={self._m}")
+
+    def build_reactions_from_templates_rdkit(
+      self,
+      max_reactions: int = 5000,
+      max_pairs_default: int = 2000,
+      max_outcomes_per_pair_default: int = 8,
+    ) -> None:
+      """
+      Template expansion using RDKit reaction SMARTS/SMIRKS from smirks_rules.yaml.
+      Each rule must provide `smirks: "..."`.
+      We support arity 1 or 2. For each matching reactant (or pair) we generate
+      product sets, auto-adding unseen species by SMILES. Stoichiometry is 1:1.
+      IMPORTANT: We match & run reactions on molecules with EXPLICIT hydrogens,
+      because many templates use [H] explicitly. Products are then stripped of
+      explicit H before canonical SMILES.
+      """
+
+      if self.engine != "rdkit":
+          print("[WARN] Engine is not 'rdkit'; no template expansion performed.")
+          # Keep matrices empty
+          self._S = np.zeros((self._m, 0), dtype=float)
+          self._U = np.zeros(0, dtype=float)
+          self._delta_rG = np.zeros(0, dtype=float)
+          self._allowed_global = np.zeros(0, dtype=bool)
+          self._participants_all = []
+          self._usesX_all = np.zeros(0, dtype=bool)
+          self._consumes = np.maximum(-self._S, 0.0)
+          return
+
+      rules = self.smirks_rules.get("rules", [])
+      if not isinstance(rules, list):
+          print("[WARN] smirks_rules.yaml has no 'rules' list; no reactions built.")
+          rules = []
+
+      # Canonical SMILES map and molecule caches (implicit-H and explicit-H)
+      smi_to_idx: Dict[str, int] = {}
+      mol_cache_noH: List[Optional[Chem.Mol]] = []
+      mol_cache_H: List[Optional[Chem.Mol]] = []
+      for idx, r in enumerate(self._species_table):
+          csmi = self._canonical_smiles(r["smiles"])
+          smi_to_idx[csmi] = idx
+          m = self._mol_from_smiles(csmi)
+          mol_cache_noH.append(m)
+          mol_cache_H.append(Chem.AddHs(m) if m is not None else None)
+
+      def ensure_species(smi: str, name_hint: Optional[str] = None) -> int:
+          csmi = self._canonical_smiles(smi)
+          idx = smi_to_idx.get(csmi, None)
+          if idx is not None:
+              return idx
+          new_idx = self._add_species_from_smiles(csmi, name_hint=name_hint)
+          smi_to_idx[csmi] = new_idx
+          m = self._mol_from_smiles(csmi)
+          mol_cache_noH.append(m)
+          mol_cache_H.append(Chem.AddHs(m) if m is not None else None)
+          return new_idx
+
+      # Collect (reactant_idx_list, product_idx_list)
+      rxn_pairs: List[Tuple[List[int], List[int]]] = []
+
+      for rule in rules:
+          rid = str(rule.get("id", "?"))
+          smirks = rule.get("smirks", None)
+          if not smirks:
+              # Not a template rule; skip (explicit rules handled in build_reactions_from_smirks)
+              continue
+
+          try:
+              rxn = rdChemReactions.ReactionFromSmarts(smirks, useSmiles=True)
+          except Exception as e:
+              print(f"[WARN] Could not parse rule '{rid}': {e}")
+              continue
+
+          arity = rxn.GetNumReactantTemplates()
+          if arity not in (1, 2):
+              print(f"[INFO] Rule '{rid}' has arity {arity}; skipping (only 1 or 2 supported).")
+              continue
+
+          reversible = bool(rule.get("reversible", False))
+          max_pairs = int(rule.get("max_pairs", max_pairs_default))
+          max_outcomes_per_pair = int(rule.get("max_outcomes_per_pair", max_outcomes_per_pair_default))
+
+          # Candidate selection: use EXPLICIT-H molecules for substructure matching
+          cand_lists: List[List[int]] = []
+          for rpos in range(arity):
+              tmpl = rxn.GetReactantTemplate(rpos)
+              if tmpl is None:
+                  cand_lists.append([])
+                  continue
+              matches = []
+              for i, molH in enumerate(mol_cache_H):
+                  if molH is not None and molH.HasSubstructMatch(tmpl):
+                      matches.append(i)
+              cand_lists.append(matches)
+
+          # Debug: counts per rule
+          try:
+              c_counts = " x ".join(str(len(c)) for c in cand_lists)
+              print(f"[RDKIT] Rule '{rid}': arity={arity}, candidates={c_counts}")
+          except Exception:
+              pass
+
+          if any(len(c) == 0 for c in cand_lists):
+              continue
+
+          made_pairs = 0
+
+          if arity == 1:
+              for i0 in cand_lists[0]:
+                  m0H = mol_cache_H[i0]
+                  if m0H is None:
+                      continue
+                  try:
+                      prod_sets = rxn.RunReactants((m0H,))
+                  except Exception:
+                      continue
+                  if not prod_sets:
+                      continue
+
+                  for prod_tuple in prod_sets[:max_outcomes_per_pair]:
+                      prod_smis: List[str] = []
+                      for pm in prod_tuple:
+                          try:
+                              # strip explicit H for canonicalization
+                              pm2 = Chem.RemoveHs(pm)
+                              Chem.SanitizeMol(pm2)
+                              prod_smis.append(Chem.MolToSmiles(pm2, canonical=True, isomericSmiles=True))
+                          except Exception:
+                              # fall back: try without RemoveHs
+                              try:
+                                  prod_smis.append(Chem.MolToSmiles(pm, canonical=True, isomericSmiles=True))
+                              except Exception:
+                                  continue
+                      if not prod_smis:
+                          continue
+                      prod_idx_vec = [ensure_species(s) for s in prod_smis]
+                      rxn_pairs.append(([i0], prod_idx_vec))
+                      if reversible:
+                          rxn_pairs.append((prod_idx_vec, [i0]))
+                      if len(rxn_pairs) >= max_reactions:
+                          break
+                  if len(rxn_pairs) >= max_reactions:
+                      break
+
+          else:  # arity == 2
+              A, B = cand_lists
+              for i0 in A:
+                  if len(rxn_pairs) >= max_reactions or made_pairs >= max_pairs:
+                      break
+                  m0H = mol_cache_H[i0]
+                  if m0H is None:
+                      continue
+                  for i1 in B:
+                      if len(rxn_pairs) >= max_reactions or made_pairs >= max_pairs:
+                          break
+                      if i1 == i0:
+                          continue
+                      m1H = mol_cache_H[i1]
+                      if m1H is None:
+                          continue
+                      try:
+                          prod_sets = rxn.RunReactants((m0H, m1H))
+                      except Exception:
+                          continue
+                      if not prod_sets:
+                          continue
+
+                      made_pairs += 1
+                      for prod_tuple in prod_sets[:max_outcomes_per_pair]:
+                          prod_smis: List[str] = []
+                          for pm in prod_tuple:
+                              try:
+                                  pm2 = Chem.RemoveHs(pm)
+                                  Chem.SanitizeMol(pm2)
+                                  prod_smis.append(Chem.MolToSmiles(pm2, canonical=True, isomericSmiles=True))
+                              except Exception:
+                                  try:
+                                      prod_smis.append(Chem.MolToSmiles(pm, canonical=True, isomericSmiles=True))
+                                  except Exception:
+                                      continue
+                          if not prod_smis:
+                              continue
+                          prod_idx_vec = [ensure_species(s) for s in prod_smis]
+                          rxn_pairs.append(([i0, i1], prod_idx_vec))
+                          if reversible:
+                              rxn_pairs.append((prod_idx_vec, [i0, i1]))
+                          if len(rxn_pairs) >= max_reactions:
+                              break
+
+      # Build matrices (final m)
+      m = self._m
+      S_cols: List[np.ndarray] = []
+      U_list: List[float] = []
+      drg_list: List[float] = []
+      allowed_list: List[bool] = []
+      participants: List[List[int]] = []
+      usesX: List[bool] = []
+
+      def drg_of(col_vec: np.ndarray) -> Tuple[float, bool]:
+          dgf = [sp.get("dgfprime_kjmol", None) for sp in self._species_table]
+          have_all = True
+          delta = 0.0
+          for i, nu in enumerate(col_vec):
+              if abs(nu) < 1e-12:
+                  continue
+              if dgf[i] is None:
+                  have_all = False
+              else:
+                  delta += float(nu) * float(dgf[i])
+          if not have_all:
+              return 0.0, True
+          return float(delta), (delta <= 0.0)
+
+      for react_idx, prod_idx in rxn_pairs[:max_reactions]:
+          col = np.zeros(m, dtype=float)
+          for i in react_idx:
+              if 0 <= i < m:
+                  col[i] -= 1.0
+          for i in prod_idx:
+              if 0 <= i < m:
+                  col[i] += 1.0
+          if np.allclose(col, 0.0):
+              continue
+
+          drg, allowed = drg_of(col)
+          S_cols.append(col)
+          U_list.append(float(self.rng.uniform(1.0, 10.0)))
+          drg_list.append(drg)
+          allowed_list.append(allowed)
+          parts = sorted(list(set(react_idx + prod_idx)))
+          participants.append(parts)
+          usesX.append(col[self._X] < 0.0)
+
+      if S_cols:
+          S = np.stack(S_cols, axis=1)
+      else:
+          S = np.zeros((m, 0), dtype=float)
+
+      self._S = S
+      self._U = np.array(U_list, dtype=float)
+      self._delta_rG = np.array(drg_list, dtype=float)
+      self._allowed_global = np.array(allowed_list, dtype=bool)
+      self._participants_all = participants
+      self._usesX_all = np.array(usesX, dtype=bool)
+      self._consumes = np.maximum(-self._S, 0.0)
+
+      print(f"[RDKIT] Built reactions: k={self._S.shape[1]} | species m={self._m}")
 
 
     # -------------------- internals --------------------
