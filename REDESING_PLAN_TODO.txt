@@ -1,0 +1,34 @@
+Résumé ultra-compact de l'approche validée
+Phase 1 : Génération (Hors-ligne)
+
+Rôle de RMG-Py : Un script, exécuté une seule fois dans Docker, génère l'univers chimique.
+
+Sorties : Il produit des fichiers statiques contenant le dictionnaire d'espèces (avec leurs données thermo de base/fallback) et le dictionnaire de réactions (avec leurs paramètres cinétiques fondamentaux - Arrhenius).
+
+Phase 2 : Résolution (En-ligne)
+
+Rôle du Provider : Le programme principal, exécuté localement, charge les fichiers. Son Provider a un double rôle crucial :
+
+Thermo : Il calcule le ?G 
+f
+'
+?
+  final et à haute fidélité de chaque espèce en gérant le pH/I, utilisant les données RMG comme secours. Le ?G 
+r
+'
+?
+  des réactions est calculé à la volée.
+
+Cinétique : Il lit les paramètres Arrhenius, calcule la vitesse k(T) de chaque réaction à la température de la simulation, et la convertit en une borne de capacité U physiquement significative pour le solveur.
+
+Rôle du Solveur MILP : Utilise les données préparées par le Provider pour effectuer sa recherche.
+
+Rôle de RDKit : N'est plus nécessaire.
+
+Viabilité et Portée
+
+Taille & Profondeur : Pour une cible C10, une profondeur de génération de ~12-13 est requise, produisant des fichiers de taille considérée comme tractable (qq centaines de Mo) grâce aux filtres stricts (limite de taille des molécules).
+
+Performance : Le solveur gère le grand nombre de réactions grâce à son architecture par expansion de portée incrémentale, n'analysant qu'un petit sous-ensemble à la fois.
+
+Couverture : L'approche garantit une couverture significative de l'espace de réaction réel pertinent, car elle se base sur l'application systématique de familles de réactions fondamentales.
