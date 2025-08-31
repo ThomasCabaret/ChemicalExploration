@@ -1,23 +1,22 @@
 version: 0
 rules:
-
   - id: thioesterification_template
     reversible: false
-    smirks: "[C:1](=O)[O;H1:2].[S;H1:3][C:4]>>[C:1](=O)[S:3][C:4].[O:2]"
+    smirks: "[C:1](=O)[O;H1:2].[S;H1:3][C:4]>>[C:1](=O)[S:3][C:4].[O:2][H]"
     max_pairs: 32
     max_outcomes_per_pair: 4
-    notes: "Matches generic acid OH and generic thiol SH"
+    notes: "acid OH + thiol SH -> thioester + water (H from S goes to O)"
 
   - id: thioester_to_amide_with_ammonia
     reversible: false
-    smirks: "[C:1](=O)[S:2][C:3].[N;H3:4]>>[C:1](=O)[N;H2:4].[S;H1:2][C:3]"
+    smirks: "[C:1](=O)[S:2][C:3].[N;H3:4]>>[C:1](=O)[N:4].[S:2][C:3]"
     max_pairs: 64
     max_outcomes_per_pair: 4
-    notes: "Consumes one H from N and gives it to S (leaving group)"
+    notes: "ammonia aminolysis of thioester -> amide + thiol"
 
   - id: thioester_to_amide_with_primary_amine
     reversible: false
-    smirks: "[C:1](=O)[S:2][C:3].[N;H2:4]>>[C:1](=O)[N;H1:4].[S;H1:2][C:3]"
+    smirks: "[C:1](=O)[S:2][C:3].[N;H2;!$([N][C](=O)):4]>>[C:1](=O)[N:4].[S:2][C:3]"
     max_pairs: 64
     max_outcomes_per_pair: 4
-    notes: "Generic primary amine; N loses one H, S gains one H"
+    notes: "primary amine (not amide N) aminolysis of thioester -> amide + thiol"

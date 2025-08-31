@@ -18,7 +18,7 @@
 +-- real_chem_provider.py     # Provider (loads data, builds network)
 ¦
 +-- config/
-¦   +-- env.yaml              # Environment and engine settings
+¦   +-- env.yaml              # Environment
 ¦
 +-- data/
 ¦   +-- food.csv              # Input food species
@@ -95,7 +95,7 @@ mal,malate,C(C(C(=O)[O-])O)C(=O)[O-]
 
 ### Environment (`config/env.yaml`)
 
-This file controls the simulation environment parameters and the reaction engine.
+This file controls the simulation environment parameters
 
 *Example: `config/env.yaml`*
 ```yaml
@@ -103,7 +103,6 @@ temperature_K: 298.15
 pH: 7.0
 ionic_strength_M: 0.1
 food_budget: 50.0
-engine: rdkit
 smirks_rules: templates/smirks_rules.yaml
 ```
 
