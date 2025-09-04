@@ -1,9 +1,8 @@
-id,name,smiles
-CH4,methane,C
-CO,carbon_monoxide,[C-]#[O+]
-CO2,carbon_dioxide,O=C=O
-H2,hydrogen,[H][H]
-H2S,hydrogen_sulfide,[H]S[H]
-HCN,hydrogen_cyanide,C#N
-H2O,water,O
-H,hydrogen_atom,[H]
+id,name,repr_kind,repr
+CH4,methane,smiles,C
+CO,carbon_monoxide,smiles,[C-]#[O+]
+CO2,carbon_dioxide,smiles,O=C=O
+H2,hydrogen,smiles,[H][H]
+H2S,hydrogen_sulfide,smiles,[H]S[H]
+HCN,hydrogen_cyanide,smiles,C#N
+H2O,water,smiles,O
